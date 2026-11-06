@@ -1,0 +1,66 @@
+{
+    "total_capital_hkd": 300000.0,
+    "risk_free_rate": 0.04,
+    "max_single_position_pct": 0.35,
+    "min_adv_hkd": 5000000.0,
+    "alloc_method": "hrp",
+    "cov_estimator": "ledoit_wolf",
+    "max_turnover": 0.4,
+    "broker_comm_rate": 0.0003,
+    "min_broker_comm_hkd": 15.0,
+    "almgren_gamma": 0.35,
+    "num_backtest_trials": 5,
+    "holdings": [
+        {
+            "ticker": "0700.HK",
+            "name": "騰訊控股",
+            "lot_size": 100,
+            "shares": 300,
+            "entry_price": 360.0,
+            "short_eligible": true,
+            "roic": 0.16,
+            "debt_to_ebitda": 1.2,
+            "thesis": "遊戲版號常態化，視頻號廣告毛利率持續擴張",
+            "invalidation_rule": "核心遊戲收入連續兩季按年下跌超過 5%"
+        },
+        {
+            "ticker": "0005.HK",
+            "name": "匯豐控股",
+            "lot_size": 400,
+            "shares": 1200,
+            "entry_price": 68.0,
+            "short_eligible": true,
+            "roic": 0.11,
+            "debt_to_ebitda": 2.5,
+            "thesis": "高息環境維持淨息差，持續進行大規模股份回購",
+            "invalidation_rule": "宣布暫停派息或停止回購計畫"
+        },
+        {
+            "ticker": "3690.HK",
+            "name": "美團-W",
+            "lot_size": 100,
+            "shares": 400,
+            "entry_price": 130.0,
+            "short_eligible": true,
+            "roic": 0.08,
+            "debt_to_ebitda": 1.8,
+            "thesis": "到店業務競爭趨緩，外賣單均盈利能力穩固",
+            "invalidation_rule": "抖音本地生活市佔率進一步蠶食導致營業利潤轉負"
+        },
+        {
+            "ticker": "2475.HK",
+            "name": "立訊精密",
+            "lot_size": 100,
+            "shares": 100,
+            "entry_price": 44.0,
+            "short_eligible": false,
+            "roic": 0.12,
+            "debt_to_ebitda": 1.5,
+            "thesis": "業務穩健增長",
+            "invalidation_rule": "核心業務數據顯著惡化"
+        }
+    ],
+    "futu_host": "127.0.0.1",
+    "futu_port": 11111,
+    "enable_futu": false
+}
