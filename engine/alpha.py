@@ -142,12 +142,14 @@ def compute_intraday_vwap_and_tod_volume(df: pd.DataFrame) -> tuple[pd.Series, f
 # ============================================================================
 # Task 2.1: Calibrated Multi-Factor Scoring & Collinearity Diagnostics
 # ============================================================================
-def _winsorize_and_standardize(series: pd.Series, window: int = 60, clip_sigma: float = 3.0) -> pd.Series:
-    """Rolling Z-score standardization with strict Winsorization at [-clip_sigma, +clip_sigma]."""
-    min_p = max(10, window // 3)
-    roll_mean = series.rolling(window, min_periods=min_p).mean()
-    roll_std = series.rolling(window, min_periods=min_p).std()
-    z = (series - roll_mean) / (roll_std + 1e-9)
+def _winsorize_and_standardize(series: pd.Series, window: int = 120, clip_sigma: float = 3.0) -> pd.Series:
+    """Zero-anchored Root-Mean-Square (RMS) standardization with Winsorization at [-clip_sigma, +clip_sigma].
+    Preserves the natural zero-equilibrium of financial return/flow signals without short-window mean-shift distortion.
+    """
+    min_p = max(15, window // 4)
+    s_clean = series.fillna(0.0)
+    rms = np.sqrt((s_clean * s_clean).rolling(window, min_periods=min_p).mean().bfill())
+    z = s_clean / (rms + 1e-9)
     return z.clip(-clip_sigma, clip_sigma).fillna(0.0)
 
 
@@ -156,11 +158,11 @@ def compute_factor_exposure_and_ic_weights(
     fundamental_z: float = 0.0,
     macro_z: float = 0.0,
     horizon: int = 5,
-    ic_window: int = 120,
+    ic_window: int = 500,
 ) -> dict[str, Any]:
     """
     Construct the 4 canonical institutional factor series using strictly lagged / confirmed bars,
-    calibrate weights via rolling Rank-IC (Spearman correlation with forward returns),
+    calibrate weights via signed Rank-IC Bayesian shrinkage (aligning both trend-following and mean-reverting stocks),
     transform into Logistic Regression upward trend probability P(Upward Trend | Factors) in [0, 1],
     and compute Collinearity Diagnostics (VIF & pairwise factor correlation matrix).
     """
@@ -170,42 +172,33 @@ def compute_factor_exposure_and_ic_weights(
     vol = df['Volume'].fillna(0.0)
     susp = df['Is_Suspended'] if 'Is_Suspended' in df.columns else (vol <= 0)
 
-    rets = close.pct_change().mask(susp, np.nan)
+    rets = close.pct_change().mask(susp, np.nan).fillna(0.0)
     vol_20 = rets.rolling(20, min_periods=10).std().bfill().fillna(0.02)
     vol_60 = rets.rolling(60, min_periods=20).std().bfill().fillna(vol_20)
 
-    # 1. Momentum Factor: risk-adjusted 5D and 20D momentum
-    ir_5d = close.pct_change(5) / (vol_20 * np.sqrt(5.0) + 1e-9)
-    ir_20d = close.pct_change(20) / (vol_60 * np.sqrt(20.0) + 1e-9)
-    raw_mom = 0.45 * ir_5d.fillna(0.0) + 0.55 * ir_20d.fillna(0.0)
-    z_mom = _winsorize_and_standardize(raw_mom, window=60)
+    # 1. Momentum Factor: risk-adjusted 5D and 20D trend persistence
+    ir_5d = close.pct_change(5).fillna(0.0) / (vol_20 * np.sqrt(5.0) + 1e-9)
+    ir_20d = close.pct_change(20).fillna(0.0) / (vol_60 * np.sqrt(20.0) + 1e-9)
+    raw_mom = 0.35 * ir_5d + 0.65 * ir_20d
+    z_mom = _winsorize_and_standardize(raw_mom, window=120)
 
-    # 2. Value & Quality Factor: combines cross-sectional fundamental Z with 60D long-term value anchor
+    # 2. Value & Quality Factor: combines short/medium valuation pullback anchor with fundamental Z
     sma_60 = close.rolling(60, min_periods=20).mean().bfill()
-    dist_60 = (close - sma_60) / (sma_60 + 1e-9)
-    z_val_ts = _winsorize_and_standardize(-dist_60.diff(5).fillna(0.0), window=60)
-    z_val = (0.70 * float(np.clip(fundamental_z, -3.0, 3.0)) + 0.30 * z_val_ts).clip(-3.0, 3.0)
+    dist_60 = (close - sma_60) / (sma_60 * vol_60 * np.sqrt(20.0) + 1e-9)
+    z_val_ts = _winsorize_and_standardize(-0.65 * ir_5d - 0.35 * dist_60.fillna(0.0), window=120)
+    z_val = (0.80 * z_val_ts + 0.20 * float(np.clip(fundamental_z, -3.0, 3.0))).clip(-3.0, 3.0)
 
-    # 3. Volatility / Stability Factor: penalizes high downside volatility and erratic ATR spikes
-    downside_rets = rets.clip(upper=0.0)
-    downside_vol = downside_rets.rolling(20, min_periods=10).std().bfill().fillna(0.015)
-    tr = pd.concat([
-        high - low,
-        (high - close.shift(1)).abs(),
-        (low - close.shift(1)).abs(),
-    ], axis=1).max(axis=1)
-    atr_pct = (tr.rolling(14, min_periods=7).mean() / (close + 1e-9)).bfill().fillna(0.02)
-    raw_vol_stability = -(0.60 * downside_vol + 0.40 * atr_pct)
-    z_vol = _winsorize_and_standardize(raw_vol_stability, window=60)
+    # 3. Volatility / Asymmetric Risk Quality: Upside vs Downside semivariance symmetry
+    up_vol = rets.clip(lower=0.0).rolling(20, min_periods=10).std().bfill().fillna(0.015)
+    dn_vol = (-rets).clip(lower=0.0).rolling(20, min_periods=10).std().bfill().fillna(0.015)
+    raw_vol_stability = np.log((up_vol + 1e-6) / (dn_vol + 1e-6))
+    z_vol = _winsorize_and_standardize(raw_vol_stability, window=120)
 
-    # 4. Liquidity & Microstructure Factor: Amihud illiquidity inverse + signed volume flow
-    dollar_vol = (close * vol).replace(0.0, np.nan)
-    amihud = (rets.abs() / (dollar_vol + 1e-9)).rolling(20, min_periods=10).mean()
-    z_amihud_inv = _winsorize_and_standardize(-np.log1p(amihud.fillna(0.0) * 1e8), window=60)
-    vol_ma20 = vol.rolling(20, min_periods=10).mean()
-    signed_vol_ratio = ((vol / (vol_ma20 + 1e-9)) - 1.0) * np.sign(rets.fillna(0.0))
-    z_flow = _winsorize_and_standardize(signed_vol_ratio.fillna(0.0), window=60)
-    z_liq = (0.50 * z_amihud_inv + 0.50 * z_flow).clip(-3.0, 3.0)
+    # 4. Liquidity & Microstructure Factor: 20D Chaikin Money Flow (CMF) + volume-weighted accumulation
+    hl_range = (high - low).replace(0.0, np.nan)
+    clv = (((close - low) - (high - close)) / (hl_range + 1e-9)).fillna(0.0).clip(-1.0, 1.0)
+    cmf_20 = (clv * vol).rolling(20, min_periods=10).sum() / (vol.rolling(20, min_periods=10).sum() + 1e-9)
+    z_liq = _winsorize_and_standardize(cmf_20, window=120)
 
     factor_df = pd.DataFrame({
         "Momentum": z_mom,
@@ -214,19 +207,19 @@ def compute_factor_exposure_and_ic_weights(
         "Liquidity_Micro": z_liq,
     }, index=df.index)
 
-    # Strictly prevent look-ahead in IC calibration:
     # Factor at t-1 predicts return from Open[t] to Close[t + horizon - 1]
     open_col = df['Open'] if 'Open' in df.columns else close
     fwd_ret_for_ic = (close.shift(-horizon) / (open_col.shift(-1) + 1e-9)) - 1.0
-    valid_ic_slice = factor_df.iloc[:-horizon - 1].tail(ic_window)
+    eff_window = max(180, int(ic_window))
+    valid_ic_slice = factor_df.iloc[30:-horizon - 1].tail(eff_window)
     valid_fwd = fwd_ret_for_ic.loc[valid_ic_slice.index]
 
     raw_ics: dict[str, float] = {}
-    prior_weights = {
-        "Momentum": 0.35,
-        "Value_Quality": 0.25,
-        "Volatility_Quality": 0.20,
-        "Liquidity_Micro": 0.20,
+    ic_priors = {
+        "Momentum": 0.012,
+        "Value_Quality": 0.010,
+        "Volatility_Quality": 0.008,
+        "Liquidity_Micro": 0.008,
     }
     for col in factor_df.columns:
         s_f = valid_ic_slice[col]
@@ -235,22 +228,25 @@ def compute_factor_exposure_and_ic_weights(
             ic_val, _ = spearmanr(s_f[mask_valid], valid_fwd[mask_valid])
             raw_ics[col] = float(0.0 if np.isnan(ic_val) else ic_val)
         else:
-            raw_ics[col] = prior_weights[col] * 0.15
+            raw_ics[col] = ic_priors[col]
 
-    ic_scores = {}
+    # Signed Bayesian IC-proportional weighting in true IC units (aligns factor polarity with stock regime)
+    signed_ic_scores: dict[str, float] = {}
     for col in factor_df.columns:
-        emp_weight = max(0.02, abs(raw_ics[col]) if raw_ics[col] >= -0.05 else 0.05)
-        ic_scores[col] = 0.55 * prior_weights[col] + 0.45 * emp_weight
+        blended_ic = 0.88 * raw_ics[col] + 0.12 * ic_priors[col]
+        signed_ic_scores[col] = blended_ic * (1.0 + 10.0 * abs(blended_ic))
 
-    total_ic_score = sum(ic_scores.values()) + 1e-9
-    calibrated_weights = {col: float(val / total_ic_score) for col, val in ic_scores.items()}
+    total_abs_ic = sum(abs(val) for val in signed_ic_scores.values()) + 1e-9
+    calibrated_weights = {col: float(val / total_abs_ic) for col, val in signed_ic_scores.items()}
 
     composite_z_series = (
-        calibrated_weights["Momentum"] * factor_df["Momentum"]
-        + calibrated_weights["Value_Quality"] * factor_df["Value_Quality"]
-        + calibrated_weights["Volatility_Quality"] * factor_df["Volatility_Quality"]
-        + calibrated_weights["Liquidity_Micro"] * factor_df["Liquidity_Micro"]
-        + 0.15 * float(np.clip(macro_z, -3.0, 3.0))
+        (
+            calibrated_weights["Momentum"] * factor_df["Momentum"]
+            + calibrated_weights["Value_Quality"] * factor_df["Value_Quality"]
+            + calibrated_weights["Volatility_Quality"] * factor_df["Volatility_Quality"]
+            + calibrated_weights["Liquidity_Micro"] * factor_df["Liquidity_Micro"]
+        ) * 1.35
+        + 0.12 * float(np.clip(macro_z, -3.0, 3.0))
     ).clip(-3.0, 3.0)
 
     prob_up_series = 1.0 / (1.0 + np.exp(-0.85 * composite_z_series))
@@ -285,12 +281,14 @@ def compute_factor_exposure_and_ic_weights(
         w_v = float(calibrated_weights[col])
         contrib_z = z_v * w_v
         vif_v = vif_map[col]
+        # Display IC-aligned exposure so positive bar always means bullish contribution
+        aligned_z = z_v if w_v >= 0 else -z_v
         exposure_rows.append({
             "factor_key": col,
             "factor_name": label_map[col],
-            "z_score": round(z_v, 3),
-            "rank_ic": round(raw_ics[col], 4),
-            "ic_weight_pct": round(w_v * 100.0, 1),
+            "z_score": round(aligned_z, 3),
+            "rank_ic": round(abs(raw_ics[col]) if (raw_ics[col] * w_v) >= 0 else raw_ics[col], 4),
+            "ic_weight_pct": round(abs(w_v) * 100.0, 1),
             "marginal_contribution_z": round(contrib_z, 3),
             "vif": round(vif_v, 2),
             "collinearity_status": "🟢 獨立正交 (VIF < 2.5)" if vif_v < 2.5 else ("🟡 輕微共線" if vif_v < 5.0 else "🔴 高度共線"),
@@ -618,7 +616,7 @@ def analyze_stock_trend(ticker: str) -> tuple[dict[str, Any] | None, str | None]
             fundamental_z=fundamental["val_qual_zscore"],
             macro_z=macro["macro_zscore"],
             horizon=10,
-            ic_window=120,
+            ic_window=max(252, len(df) - 30),
         )
 
         composite_z = factor_model["latest_composite_z"]

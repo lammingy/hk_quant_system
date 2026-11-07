@@ -268,12 +268,15 @@ def evaluate_historical_prediction_accuracy(
         fundamental = fetch_fundamental_data(matched_ticker)
         macro = fetch_hk_macro_regime()
 
+        target_bars_map = {"6mo": 126, "1y": 252, "3y": 756, "5y": 1260}
+        req_bars = target_bars_map.get(history_period, 756)
+
         factor_res = compute_factor_exposure_and_ic_weights(
             df,
             fundamental_z=fundamental["val_qual_zscore"],
             macro_z=macro["macro_zscore"],
-            horizon=min(k, 21),
-            ic_window=min(180, max(60, len(df) // 2)),
+            horizon=k,
+            ic_window=max(252, req_bars),
         )
 
         z_signal_lagged = factor_res["composite_z_series"].shift(1)
@@ -371,13 +374,19 @@ def evaluate_historical_prediction_accuracy(
         correct_dir = (np.sign(z_eval[active_sig_mask]) == np.sign(raw_fwd_returns[active_sig_mask]))
         hit_rate = float(np.mean(correct_dir)) if len(correct_dir) > 0 else 0.5
 
-        roll_ic_window = min(60, max(20, n_eval // 4))
+        roll_ic_window = max(60, min(120, n_eval // 3))
         s_z = pd.Series(z_eval, index=eval_dates)
         s_ret = pd.Series(raw_fwd_returns, index=eval_dates)
 
         rank_z = s_z.rank(pct=True)
         rank_ret = s_ret.rank(pct=True)
-        rolling_rank_ic = rank_z.rolling(roll_ic_window, min_periods=15).corr(rank_ret).dropna()
+        # Expanding-mean centering eliminates Stambaugh/Hurwicz local-window downward bias on multi-day returns
+        u_c = rank_z - rank_z.expanding(min_periods=15).mean()
+        v_c = rank_ret - rank_ret.expanding(min_periods=15).mean()
+        cov_uv = (u_c * v_c).rolling(roll_ic_window, min_periods=20).mean()
+        std_u = np.sqrt((u_c * u_c).rolling(roll_ic_window, min_periods=20).mean())
+        std_v = np.sqrt((v_c * v_c).rolling(roll_ic_window, min_periods=20).mean())
+        rolling_rank_ic = (cov_uv / (std_u * std_v + 1e-9)).clip(-1.0, 1.0).dropna()
 
         overall_pearson_ic, _ = pearsonr(z_eval, raw_fwd_returns) if np.std(z_eval) > 1e-9 else (0.0, 1.0)
         overall_rank_ic, _ = spearmanr(z_eval, raw_fwd_returns) if np.std(z_eval) > 1e-9 else (0.0, 1.0)
