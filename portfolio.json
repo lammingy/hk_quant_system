@@ -62,5 +62,5 @@
     ],
     "futu_host": "127.0.0.1",
     "futu_port": 11111,
-    "enable_futu": false
+    "enable_futu": true
 }

@@ -19,10 +19,10 @@ import pandas as pd
 import yfinance as yf
 
 try:
-    from hk_quant_system.config.settings import DB_FILE, get_candidate_tickers
+    from hk_quant_system.config.settings import DB_FILE, HK_DEFAULT_LOT_SIZES, get_candidate_tickers
     from hk_quant_system.data.futu_gateway import fetch_realtime_spot_price
 except (ImportError, ValueError):
-    from config.settings import DB_FILE, get_candidate_tickers
+    from config.settings import DB_FILE, HK_DEFAULT_LOT_SIZES, get_candidate_tickers
     from data.futu_gateway import fetch_realtime_spot_price
 
 
